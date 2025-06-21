@@ -35,7 +35,7 @@ mod image_data {
 		},
 	};
 
-	fn last_error(message: &str) -> Error {
+	pub(crate) fn last_error(message: &str) -> Error {
 		let os_error = io::Error::last_os_error();
 		Error::unknown(format!("{}: {}", message, os_error))
 	}
@@ -186,6 +186,7 @@ mod image_data {
 		}
 	}
 
+	#[allow(unused)]
 	pub(super) fn read_cf_dibv5(dibv5: &[u8]) -> Result<ImageData<'static>, Error> {
 		// The DIBV5 format is a BITMAPV5HEADER followed by the pixel data according to
 		// https://docs.microsoft.com/en-us/windows/win32/dataxchg/standard-clipboard-formats
@@ -620,20 +621,33 @@ impl<'clipboard> Get<'clipboard> {
 
 	#[cfg(feature = "image-data")]
 	pub(crate) fn image(self) -> Result<ImageData<'static>, Error> {
-		const FORMAT: u32 = clipboard_win::formats::CF_DIBV5;
+		// Register PNG format.
+		let format_id = match clipboard_win::register_format("PNG") {
+			Some(format_id) => format_id.into(),
+			None => return Err(image_data::last_error("Cannot register PNG clipboard format.")),
+		};
 
 		let _clipboard_assertion = self.clipboard?;
 
-		if !clipboard_win::is_format_avail(FORMAT) {
+		if !clipboard_win::is_format_avail(format_id) {
 			return Err(Error::ContentNotAvailable);
 		}
 
 		let mut data = Vec::new();
 
-		clipboard_win::raw::get_vec(FORMAT, &mut data)
+		clipboard_win::raw::get_vec(format_id, &mut data)
 			.map_err(|_| Error::unknown("failed to read clipboard image data"))?;
 
-		image_data::read_cf_dibv5(&data)
+		let mut reader = image::io::Reader::new(std::io::Cursor::new(&data));
+		reader.set_format(image::ImageFormat::Png);
+		let image = match reader.decode() {
+			Ok(img) => img.into_rgba8(),
+			Err(_e) => return Err(Error::ConversionFailure),
+		};
+		let (w, h) = image.dimensions();
+		let image_data =
+			ImageData { width: w as usize, height: h as usize, bytes: image.into_raw().into() };
+		Ok(image_data)
 	}
 
 	pub(crate) fn file_list(self) -> Result<Vec<PathBuf>, Error> {
