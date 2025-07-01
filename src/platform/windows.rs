@@ -263,6 +263,19 @@ mod image_data {
 		}
 	}
 
+	pub(super) fn read_png(data: &[u8]) -> Result<ImageData<'static>, Error> {
+		let mut reader = image::io::Reader::new(std::io::Cursor::new(&data));
+		reader.set_format(image::ImageFormat::Png);
+		let image = match reader.decode() {
+			Ok(img) => img.into_rgba8(),
+			Err(_e) => return Err(Error::ConversionFailure),
+		};
+		let (w, h) = image.dimensions();
+		let image_data =
+			ImageData { width: w as usize, height: h as usize, bytes: image.into_raw().into() };
+		Ok(image_data)
+	}
+
 	fn get_screen_device_context() -> Result<HDC, Error> {
 		// SAFETY: Calling `GetDC` with `NULL` is safe.
 		let hdc = unsafe { GetDC(ResultValue::NULL) };
@@ -604,19 +617,26 @@ impl<'clipboard> Get<'clipboard> {
 
 	#[cfg(feature = "image-data")]
 	pub(crate) fn image(self) -> Result<ImageData<'static>, Error> {
-		const FORMAT: u32 = clipboard_win::formats::CF_DIBV5;
-
 		let _clipboard_assertion = self.clipboard?;
 
-		if !clipboard_win::is_format_avail(FORMAT) {
+		if let Some(png_format_id) = clipboard_win::register_format("PNG")
+			.map(From::from)
+			.filter(|id| clipboard_win::is_format_avail(*id))
+		{
+			let mut data = Vec::new();
+			clipboard_win::raw::get_vec(png_format_id, &mut data)
+				.map_err(|_| Error::unknown("failed to read clipboard PNG image data"))?;
+			return image_data::read_png(&data);
+		}
+
+		// Try falling back to CF_DIBV5 if PNG isn't available.
+		if !clipboard_win::is_format_avail(clipboard_win::formats::CF_DIBV5) {
 			return Err(Error::ContentNotAvailable);
 		}
 
 		let mut data = Vec::new();
-
-		clipboard_win::raw::get_vec(FORMAT, &mut data)
+		clipboard_win::raw::get_vec(clipboard_win::formats::CF_DIBV5, &mut data)
 			.map_err(|_| Error::unknown("failed to read clipboard image data"))?;
-
 		image_data::read_cf_dibv5(&data)
 	}
 
